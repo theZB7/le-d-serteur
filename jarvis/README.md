@@ -50,3 +50,4 @@ Jarvis se synchronise au lancement, à chaque nouvelle note ou réponse, quand t
 | `manifest.webmanifest` | Nom, couleurs et icônes pour l'installation |
 | `sw.js` | Garde l'interface disponible hors ligne |
 | `icon.svg`, `icon-*.png` | Icônes |
+| `SIRI.md` | Relier Jarvis à Siri et aux données de l'iPhone, de l'iPad et du Mac |
