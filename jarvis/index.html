@@ -176,6 +176,7 @@ dialog .hint { font-size: 13px; color: var(--muted); margin: 6px 0 0; }
 dialog .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; flex-wrap: wrap; }
 .ghost { background: none; border: 1px solid var(--line); border-radius: 10px; padding: 9px 14px; }
 .danger { color: var(--red); }
+dialog a { color: var(--cyan); }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 </style>
 
@@ -249,6 +250,13 @@ dialog .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18
       <option value="claude-sonnet-5-5">Claude Sonnet 5.5 — plus rapide</option>
       <option value="claude-haiku-5-5">Claude Haiku 5.5 — très rapide, économique</option>
     </select>
+  </div>
+  <div id="syncSettings">
+    <label for="ghToken">Synchronisation entre appareils (jeton GitHub)</label>
+    <input class="field" id="ghToken" type="password" autocomplete="off" placeholder="github_pat_… ou ghp_…">
+    <p class="hint">Colle le même jeton sur chaque appareil : le carnet et la conversation y seront identiques. Ils sont gardés dans un Gist privé de ton compte GitHub. <a href="https://github.com/settings/tokens/new?scopes=gist&amp;description=Jarvis" target="_blank" rel="noopener">Créer le jeton</a> (case « gist » seulement).</p>
+    <p class="hint" id="syncState">Synchronisation désactivée.</p>
+    <div class="row" style="justify-content:flex-start;margin-top:8px"><button class="ghost" id="syncNow">Synchroniser maintenant</button></div>
   </div>
   <p class="hint" id="hostedHint" hidden>Jarvis utilise ton compte Claude : aucune clé à fournir. Tes notes sont privées et enregistrées avec cette page.</p>
   <label for="voiceSel">Voix</label>
@@ -482,12 +490,107 @@ async function hostedNotes() {
 }
 function localNotes() {
   notes = store.get("notes", []);
-  const persist = () => { store.set("notes", notes); renderNotes(); };
+  const persist = () => { store.set("notes", notes); renderNotes(); sync.soon(); };
   return {
     async save(n) { notes.unshift(n); persist(); },
-    async remove(id) { notes = notes.filter((n) => n.id !== id); persist(); },
+    async remove(id) {
+      notes = notes.filter((n) => n.id !== id);
+      const del = store.get("deleted", {}); del[id] = new Date().toISOString(); store.set("deleted", del);
+      persist();
+    },
   };
 }
+
+/* ---------- Synchronisation entre appareils (Gist privé GitHub) ---------- */
+const GIST_DESC = "Jarvis — synchronisation (ne pas supprimer)";
+const GIST_FILE = "jarvis.json";
+const canon = (st) => JSON.stringify({
+  notes: [...(st.notes || [])].sort((a, b) => a.id.localeCompare(b.id)),
+  deleted: Object.fromEntries(Object.entries(st.deleted || {}).sort()),
+  turns: st.turns || [], turnsAt: st.turnsAt || "",
+});
+function localState() {
+  return { notes, deleted: store.get("deleted", {}), turns, turnsAt: store.get("turnsAt", "") };
+}
+function mergeState(a, b) {
+  const deleted = { ...(b.deleted || {}) };
+  for (const [id, d] of Object.entries(a.deleted || {})) if (!deleted[id] || d > deleted[id]) deleted[id] = d;
+  const byId = new Map();
+  for (const n of [...(b.notes || []), ...(a.notes || [])]) {
+    if (!n?.id || deleted[n.id]) continue;
+    const prev = byId.get(n.id);
+    if (!prev || (n.date || "") >= (prev.date || "")) byId.set(n.id, n);
+  }
+  const notesM = [...byId.values()].sort((x, y) => (y.date || "").localeCompare(x.date || ""));
+  const newer = (a.turnsAt || "") >= (b.turnsAt || "") ? a : b;
+  return { notes: notesM, deleted, turns: newer.turns || [], turnsAt: newer.turnsAt || "" };
+}
+const sync = {
+  timer: null, running: false, again: false,
+  token: () => store.get("ghToken", ""),
+  state(text, warn) {
+    const el = $("syncState"); if (el) { el.textContent = text; el.style.color = warn ? "var(--red)" : ""; }
+  },
+  async api(path, opts = {}) {
+    const r = await fetch("https://api.github.com" + path, {
+      ...opts,
+      headers: { Authorization: "Bearer " + this.token(), Accept: "application/vnd.github+json", ...(opts.body ? { "Content-Type": "application/json" } : {}) },
+    });
+    if (!r.ok) throw { status: r.status };
+    return r.json();
+  },
+  async gistId() {
+    const known = store.get("gistId", "");
+    if (known) return known;
+    for (let page = 1; page <= 10; page++) {
+      const list = await this.api(`/gists?per_page=100&page=${page}`);
+      const g = list.find((x) => x.description === GIST_DESC && x.files?.[GIST_FILE]);
+      if (g) { store.set("gistId", g.id); return g.id; }
+      if (list.length < 100) break;
+    }
+    const g = await this.api("/gists", { method: "POST", body: JSON.stringify({
+      description: GIST_DESC, public: false, files: { [GIST_FILE]: { content: canon(localState()) } },
+    }) });
+    store.set("gistId", g.id);
+    return g.id;
+  },
+  soon() { if (!this.token()) return; clearTimeout(this.timer); this.timer = setTimeout(() => this.run(), 1500); },
+  async run() {
+    if (!this.token() || engine?.kind !== "api") return;
+    if (this.running) { this.again = true; return; }
+    this.running = true; this.state("Synchronisation…");
+    try {
+      const id = await this.gistId();
+      const g = await this.api("/gists/" + id);
+      const f = g.files?.[GIST_FILE];
+      let remote = {};
+      if (f) {
+        const txt = f.truncated ? await (await fetch(f.raw_url)).text() : f.content;
+        try { remote = JSON.parse(txt) || {}; } catch {}
+      }
+      const merged = mergeState(localState(), remote);
+      notes = merged.notes; store.set("notes", notes); store.set("deleted", merged.deleted);
+      if (!ctl && canon({ turns }) !== canon({ turns: merged.turns })) {
+        turns = merged.turns; store.set("turns", turns); renderChat();
+      }
+      store.set("turnsAt", merged.turnsAt);
+      renderNotes();
+      if (canon(merged) !== canon(remote)) {
+        await this.api("/gists/" + id, { method: "PATCH", body: JSON.stringify({ files: { [GIST_FILE]: { content: canon(merged) } } }) });
+      }
+      this.state("Synchronisé à " + new Date().toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }) + " · " + notes.length + " notes");
+      setStatus(engine.label + " · synchronisé · " + notes.length + " notes");
+    } catch (e) {
+      if (e?.status === 404) store.set("gistId", "");
+      const why = e?.status === 401 ? "jeton GitHub refusé, vérifie-le" : e?.status === 403 || e?.status === 404 ? "le jeton n'a pas l'autorisation « gist »" : "pas de connexion, nouvel essai plus tard";
+      this.state("Échec de la synchronisation : " + why + ".", true);
+      setStatus("Synchro en échec", true);
+    } finally {
+      this.running = false;
+      if (this.again) { this.again = false; this.soon(); }
+    }
+  },
+};
 
 /* ---------- Rendu Markdown minimal et sûr ---------- */
 const esc = (s) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -630,7 +733,8 @@ async function send() {
     }
   } finally {
     liveToolHost = null; ctl = null; busy(false);
-    store.set("turns", turns.slice(-60));
+    turns = turns.slice(-60);
+    store.set("turns", turns); store.set("turnsAt", new Date().toISOString()); sync.soon();
     scrollDown();
   }
 }
@@ -744,15 +848,21 @@ const vb = $("voiceBtn");
 vb.setAttribute("aria-pressed", String(speakOn));
 vb.onclick = () => { speakOn = !speakOn; store.set("speak", speakOn); vb.setAttribute("aria-pressed", String(speakOn)); if (!speakOn && "speechSynthesis" in window) speechSynthesis.cancel(); };
 if (!("speechSynthesis" in window)) vb.hidden = true;
-$("settingsBtn").onclick = () => { $("apiKey").value = store.get("apiKey", ""); $("model").value = store.get("model", "claude-opus-5-5"); $("settings").showModal(); };
+$("settingsBtn").onclick = () => { $("ghToken").value = store.get("ghToken", ""); $("apiKey").value = store.get("apiKey", ""); $("model").value = store.get("model", "claude-opus-5-5"); $("settings").showModal(); };
 $("closeSettings").onclick = () => $("settings").close();
 $("settings").addEventListener("close", () => {
   if (engine?.kind === "api") { store.set("apiKey", $("apiKey").value.trim()); store.set("model", $("model").value); setStatus(store.get("apiKey", "") ? engine.label + " · prêt" : "Clé API à saisir dans les Réglages", !store.get("apiKey", "")); }
   store.set("voice", $("voiceSel").value);
+  if (engine?.kind === "api") {
+    const tok = $("ghToken").value.trim();
+    if (tok !== store.get("ghToken", "")) { store.set("ghToken", tok); store.set("gistId", ""); if (!tok) sync.state("Synchronisation désactivée."); }
+    sync.run();
+  }
 });
+$("syncNow").onclick = () => { store.set("ghToken", $("ghToken").value.trim()); sync.run(); };
 $("clearChat").onclick = () => {
   const b = $("clearChat");
-  if (b.dataset.armed) { turns = []; store.set("turns", []); renderChat(); $("settings").close(); delete b.dataset.armed; b.textContent = "Effacer la conversation"; return; }
+  if (b.dataset.armed) { turns = []; store.set("turns", []); store.set("turnsAt", new Date().toISOString()); sync.soon(); renderChat(); $("settings").close(); delete b.dataset.armed; b.textContent = "Effacer la conversation"; return; }
   b.dataset.armed = "1"; b.textContent = "Confirmer l'effacement";
 };
 
@@ -770,11 +880,15 @@ async function boot() {
   }
   if (!notesBackend) notesBackend = localNotes();
   if (engine) {
-    $("standaloneSettings").hidden = true; $("hostedHint").hidden = false;
+    $("standaloneSettings").hidden = true; $("syncSettings").hidden = true; $("hostedHint").hidden = false;
     setStatus(engine.label + " · " + notes.length + " notes en mémoire");
   } else {
     engine = apiEngine();
+    $("syncSettings").hidden = false;
     setStatus(store.get("apiKey", "") ? engine.label + " · prêt" : "Clé API à saisir dans les Réglages", !store.get("apiKey", ""));
+    if (sync.token()) sync.run(); else sync.state("Synchronisation désactivée.");
+    document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") sync.run(); });
+    setInterval(() => { if (document.visibilityState === "visible") sync.run(); }, 60000);
   }
   renderNotes();
 }

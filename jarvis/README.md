@@ -31,7 +31,16 @@ Le dossier `jarvis/` est une application web installable (PWA). Il faut la mettr
 - **Android** : Chrome → menu ⋮ → **Installer l'application**.
 - **Windows / PC** : Chrome ou Edge → icône d'installation dans la barre d'adresse.
 
-Au premier lancement, ouvre les **Réglages** (roue dentée) et colle ta clé API Anthropic (à créer sur [console.anthropic.com](https://console.anthropic.com)). La clé reste dans l'appareil. Dans ce mode, le carnet est enregistré **sur chaque appareil séparément**.
+Au premier lancement, ouvre les **Réglages** (roue dentée) et colle ta clé API Anthropic (à créer sur [console.anthropic.com](https://console.anthropic.com)). La clé reste dans l'appareil.
+
+**Synchroniser tous tes appareils**
+
+Le carnet et la conversation se synchronisent par un Gist privé sur ton compte GitHub (gratuit, visible de toi seul).
+1. Crée un jeton : [github.com/settings/tokens/new](https://github.com/settings/tokens/new?scopes=gist&description=Jarvis), coche seulement **gist**, choisis une expiration, puis **Generate token** et copie-le.
+2. Dans Jarvis → **Réglages** → *Synchronisation entre appareils*, colle ce jeton.
+3. Fais la même chose sur chaque appareil, avec le même jeton.
+
+Jarvis se synchronise au lancement, à chaque nouvelle note ou réponse, quand tu reviens dans l'app, et chaque minute.
 
 ## Fichiers
 
